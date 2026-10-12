@@ -5011,6 +5011,47 @@ test("parseRolloutIncremental recomputes every-code alignment on codex-only upda
   }
 });
 
+test("parseClaudeIncremental skips OmO-mirrored sdk-ts external Claude SDK usage", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-claude-omo-"));
+  try {
+    const claudePath = path.join(tmp, "agent-claude.jsonl");
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const cursors = { version: 1, files: {}, updatedAt: null };
+    const model = "claude-opus-5-5";
+    const lines = [
+      buildClaudeUsageLine({
+        ts: "2026-09-27T06:30:00.000Z",
+        input: 1000,
+        output: 500,
+        model,
+        entrypoint: "sdk-ts",
+        userType: "external",
+        msgId: "msg-omo-mirror",
+      }),
+      buildClaudeUsageLine({
+        ts: "2026-09-27T06:35:00.000Z",
+        input: 200,
+        output: 50,
+        model,
+        entrypoint: "cli",
+        msgId: "msg-real-claude",
+      }),
+    ];
+    await fs.writeFile(claudePath, lines.join("\n") + "\n", "utf8");
+    const res = await parseClaudeIncremental({
+      projectFiles: [{ path: claudePath, source: "claude" }],
+      cursors,
+      queuePath,
+    });
+    assert.equal(res.eventsAggregated, 1);
+    const queued = await readJsonLines(queuePath);
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].input_tokens, 200);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test("parseClaudeIncremental aggregates usage into half-hour buckets", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-claude-"));
   try {
@@ -5622,6 +5663,8 @@ function buildClaudeUsageLine({
   cacheRead,
   msgId,
   requestId,
+  entrypoint,
+  userType,
 }) {
   const obj = {
     timestamp: ts,
@@ -5638,6 +5681,8 @@ function buildClaudeUsageLine({
   };
   if (typeof msgId === "string") obj.message.id = msgId;
   if (typeof requestId === "string") obj.requestId = requestId;
+  if (typeof entrypoint === "string") obj.entrypoint = entrypoint;
+  if (typeof userType === "string") obj.userType = userType;
   return JSON.stringify(obj);
 }
 

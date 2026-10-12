@@ -2846,6 +2846,8 @@ async function parseClaudeFile({
       continue;
     }
 
+    if (isOmOClaudeSdkMirror(obj)) continue;
+
     const usage = obj?.message?.usage || obj?.usage;
     if (!usage || typeof usage !== "object") continue;
 
@@ -4901,6 +4903,14 @@ function isCodexTotalOnlyResetSentinel(lastUsage, totalUsage) {
 // backward compatibility for the (msgId, reqId) format already persisted in
 // cursors.claudeHashes (msgId strings don't contain `:`, so the two formats
 // share the same Set without collision).
+// OmO Native routes Anthropic-subscription turns through the Claude Agent SDK,
+// which mirrors the same usage into ~/.claude/projects with entrypoint "sdk-ts"
+// and userType "external". OmO's passive reader already counts those turns
+// under source=omo — skip the mirrored Claude transcript copy (#726).
+function isOmOClaudeSdkMirror(obj) {
+  return obj?.entrypoint === "sdk-ts" && obj?.userType === "external";
+}
+
 function claudeMessageDedupKey(obj) {
   const msgId = typeof obj?.message?.id === "string" && obj.message.id ? obj.message.id : null;
   if (!msgId) return null;
