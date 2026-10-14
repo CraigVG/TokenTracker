@@ -17193,6 +17193,12 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     if (!quantity || usage.usage_family !== "provider" || quantity.reported !== true) return;
     const usageId = typeof usage.usage_id === "string" ? usage.usage_id : null;
     if (!usageId || seenIds.has(usageId)) return;
+    // A rewritten log is re-read from the start, and `seenIds` keeps only the
+    // newest 10k ids. Usage rows at or before the last one counted from this
+    // file are already in the queue, so skip them even if their id was evicted.
+    const micros = Number(rec.recorded_at);
+    if (fileState.skipThrough && Number.isFinite(micros) && micros <= fileState.skipThrough) return;
+    if (Number.isFinite(micros) && micros > fileState.watermark) fileState.watermark = micros;
 
     recordsProcessed++;
     const inputTotal = toNonNegativeInt(quantity.input_tokens);
@@ -17202,7 +17208,6 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     seenIds.add(usageId);
     if (inputTotal === 0 && output === 0) return;
 
-    const micros = Number(rec.recorded_at);
     if (!Number.isFinite(micros) || micros <= 0) return;
     const bucketStart = toUtcHalfHourStart(new Date(Math.floor(micros / 1000)).toISOString());
     if (!bucketStart) return;
@@ -17254,6 +17259,10 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       runModels: rewound ? {} : { ...(prev.runModels || {}) },
       // A rewritten log keeps its flag: its usage ids were already counted.
       counted: prev.counted === true,
+      // Latest usage timestamp (epoch µs) counted from this file; on a rewrite
+      // it becomes the point below which rows are not counted again.
+      watermark: Number(prev.watermark) || 0,
+      skipThrough: rewound ? Number(prev.watermark) || 0 : 0,
       isSubagent: filePath.split(path.sep).includes("subagent"),
     };
 
@@ -17297,6 +17306,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       model: fileState.model,
       runModels: keptRunModels,
       counted: fileState.counted,
+      watermark: fileState.watermark,
     };
     if (cb) {
       cb({ index: fileIdx + 1, total: files.length, recordsProcessed, eventsAggregated, bucketsQueued: touchedBuckets.size });

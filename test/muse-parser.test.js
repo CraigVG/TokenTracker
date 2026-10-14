@@ -206,6 +206,29 @@ test("parseMuseIncremental does not recount a rewritten log", () =>
     assert.equal(again.eventsAggregated, 0);
   }));
 
+test("parseMuseIncremental does not recount a rewritten log whose ids fell out of the seen set", () =>
+  withHome(async (home, env) => {
+    const step = { input_tokens: 100, cached_tokens: 0, output_tokens: 10, reasoning_tokens: 0 };
+    const model = modelRecord("r1", "muse-wonder-full-1.0");
+    const first = usageRecord("u1", "r1", step, { atUs: T0_US });
+    const file = writeSession(home, "2026/10/13/s1", [model, first]);
+    const queuePath = path.join(home, "queue.jsonl");
+    const cursors = {};
+    await parseMuseIncremental({ cursors, queuePath, env });
+
+    // The global id set is capped; simulate the id having been evicted.
+    cursors.muse.seenIds = [];
+    // Replace the log (compaction) and add one genuinely new row.
+    const added = usageRecord("u2", "r1", step, { atUs: T0_US + 60_000_000 });
+    const replacement = `${file}.tmp`;
+    fs.writeFileSync(replacement, [model, first, added].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    fs.renameSync(replacement, file); // new inode: the log is re-read from the start
+    const again = await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(again.eventsAggregated, 1, "only the new row is counted");
+    const rows = readRows(queuePath);
+    assert.equal(rows[rows.length - 1].input_tokens, 200);
+  }));
+
 test("parseMuseIncremental reads records inside a retained frame", () =>
   withHome(async (home, env) => {
     const frame = {
