@@ -17079,6 +17079,232 @@ async function parseReasonixIncremental({ telemetryFiles, cursors, queuePath, on
   return { recordsProcessed, eventsAggregated, bucketsQueued };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Muse Code (Meta) — passive session.jsonl reader.
+//
+//   ~/.local/share/muse/sessions/YYYY/MM/DD/<session>/session.jsonl
+//   ~/.local/share/muse/sessions/YYYY/MM/DD/<session>/subagent/<id>/session.jsonl
+//
+// Every record is `{id, stream, sequence, recorded_at (epoch µs), payload_type,
+// payload}`. Per-model-step usage rides on a `runtime.session` record whose
+// `payload.event.kind` is `goal_usage_attribution`:
+//
+//   quantity: {unit:"tokens", reported:true, input_tokens, output_tokens,
+//              cached_tokens, reasoning_tokens, main_llm_steps}
+//
+// Only `usage_family:"provider"` + `reported:true` rows are model usage (tool and
+// reminder rows are zero placeholders). The usage row names no model: the model
+// comes from the `run.model.configured` record of the same `run_id`.
+//
+// Token semantics (verified against the session snapshot `cost_ledger`, where
+// `input_tokens` equals the sum of these rows and `cache_read_tokens` equals
+// `cached_tokens`): `input_tokens` INCLUDES cache reads, and `reasoning_tokens`
+// is a subset of `output_tokens`. Subagent logs are separate streams whose usage
+// is not repeated in the parent log, so each file is counted once. No prompt,
+// response or path text is read or stored; only counts, timestamps and the
+// model id.
+function resolveMuseHome(env = process.env) {
+  if (env.TOKENTRACKER_MUSE_HOME) return expandHomePath(env.TOKENTRACKER_MUSE_HOME, env);
+  return path.join(env.HOME || require("node:os").homedir(), ".local", "share", "muse");
+}
+
+const MUSE_SCAN_MAX_DEPTH = 8;
+const MUSE_READ_CHUNK_BYTES = 8 * 1024 * 1024;
+
+function collectMuseSessionFiles(dir, files, depth = 0) {
+  if (depth > MUSE_SCAN_MAX_DEPTH) return;
+  let entries;
+  try { entries = fssync.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    // Dot directories (.msp-view-v1) hold derived views, not the session log.
+    if (entry.name.startsWith(".")) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) collectMuseSessionFiles(full, files, depth + 1);
+    else if (entry.isFile() && entry.name === "session.jsonl") files.push(full);
+  }
+}
+
+function resolveMuseSessionFiles(env = process.env) {
+  const sessionsDir = path.join(resolveMuseHome(env), "sessions");
+  const files = [];
+  collectMuseSessionFiles(sessionsDir, files);
+  return files;
+}
+
+// The model Muse is configured to use, for rows whose run has no model record
+// in the portion of the log we read. Reads only the `model` string.
+function resolveMuseDefaultModel(env = process.env) {
+  const fallback = "muse";
+  try {
+    const configHome = env.XDG_CONFIG_HOME || path.join(env.HOME || require("node:os").homedir(), ".config");
+    const settings = JSON.parse(fssync.readFileSync(path.join(configHome, "muse", "settings.json"), "utf8"));
+    return typeof settings?.model === "string" && settings.model.trim() ? settings.model.trim() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// A permission transaction wraps its records as JSON strings under `children`;
+// unwrap them so a model or usage record is never missed inside a frame.
+function* museRecords(entry) {
+  if (entry && Array.isArray(entry.children) && entry.retained_frame) {
+    for (const child of entry.children) {
+      if (!child || typeof child.record_json !== "string") continue;
+      try { yield JSON.parse(child.record_json); } catch { /* skip */ }
+    }
+    return;
+  }
+  yield entry;
+}
+
+async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgress, env } = {}) {
+  await ensureDir(path.dirname(queuePath));
+  const state = cursors.muse && typeof cursors.muse === "object" ? cursors.muse : {};
+  const seenIds = new Set(Array.isArray(state.seenIds) ? state.seenIds : []);
+  const fileOffsets =
+    state.fileOffsets && typeof state.fileOffsets === "object" ? { ...state.fileOffsets } : {};
+  const files = Array.isArray(sessionFiles) ? sessionFiles : resolveMuseSessionFiles(env || process.env);
+  const defaultModel = resolveMuseDefaultModel(env || process.env);
+
+  const hourlyState = normalizeHourlyState(cursors?.hourly);
+  const touchedBuckets = new Set();
+  const cb = typeof onProgress === "function" ? onProgress : null;
+  let recordsProcessed = 0;
+  let eventsAggregated = 0;
+
+  const handleRecord = (rec, fileState) => {
+    if (!rec || typeof rec !== "object") return;
+    const payload = rec.payload;
+    if (!payload || typeof payload !== "object") return;
+    if (rec.payload_type === "run.model.configured") {
+      const modelRec = payload.record;
+      const runId = modelRec?.run_stream?.id;
+      if (typeof modelRec?.model_id === "string" && modelRec.model_id) {
+        if (runId) fileState.runModels[runId] = modelRec.model_id;
+        fileState.model = modelRec.model_id;
+      }
+      return;
+    }
+    if (rec.payload_type !== "runtime.session") return;
+    const event = payload.event;
+    if (!event || event.kind !== "goal_usage_attribution") return;
+    const usage = event.record;
+    const quantity = usage?.quantity;
+    if (!quantity || usage.usage_family !== "provider" || quantity.reported !== true) return;
+    const usageId = typeof usage.usage_id === "string" ? usage.usage_id : null;
+    if (!usageId || seenIds.has(usageId)) return;
+
+    recordsProcessed++;
+    const inputTotal = toNonNegativeInt(quantity.input_tokens);
+    const output = toNonNegativeInt(quantity.output_tokens);
+    const cached = Math.min(toNonNegativeInt(quantity.cached_tokens), inputTotal);
+    const reasoning = Math.min(toNonNegativeInt(quantity.reasoning_tokens), output);
+    seenIds.add(usageId);
+    if (inputTotal === 0 && output === 0) return;
+
+    const micros = Number(rec.recorded_at);
+    if (!Number.isFinite(micros) || micros <= 0) return;
+    const bucketStart = toUtcHalfHourStart(new Date(Math.floor(micros / 1000)).toISOString());
+    if (!bucketStart) return;
+
+    const input = inputTotal - cached;
+    const model = fileState.runModels[payload.run_id] || fileState.model || defaultModel;
+    // One conversation per root session, charged to its first usage record.
+    // Subagent logs are part of their parent's conversation.
+    const conversations = fileState.counted || fileState.isSubagent ? 0 : 1;
+    fileState.counted = true;
+    const bucket = getHourlyBucket(hourlyState, "muse", model, bucketStart);
+    addTotals(bucket.totals, {
+      input_tokens: input,
+      cached_input_tokens: cached,
+      cache_creation_input_tokens: 0,
+      output_tokens: output,
+      reasoning_output_tokens: reasoning,
+      total_tokens: input + cached + output,
+      conversation_count: conversations,
+    });
+    touchedBuckets.add(bucketKey("muse", model, bucketStart));
+    eventsAggregated++;
+  };
+
+  for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
+    const filePath = files[fileIdx];
+    let stat;
+    try { stat = fssync.statSync(filePath); } catch { continue; }
+
+    const prev = fileOffsets[filePath] || {};
+    const prevSize = Number(prev.size) || 0;
+    const inodeChanged = typeof prev.ino === "number" && prev.ino !== stat.ino;
+    const rewound = stat.size < prevSize || inodeChanged;
+    const startOffset = rewound ? 0 : prevSize;
+    if (stat.size <= startOffset) continue;
+
+    const fileState = {
+      model: rewound ? null : prev.model || null,
+      runModels: rewound ? {} : { ...(prev.runModels || {}) },
+      // A rewritten log keeps its flag: its usage ids were already counted.
+      counted: prev.counted === true,
+      isSubagent: filePath.split(path.sep).includes("subagent"),
+    };
+
+    let fd;
+    try { fd = fssync.openSync(filePath, "r"); } catch { continue; }
+    let consumed = 0;
+    try {
+      let position = startOffset;
+      let carry = Buffer.alloc(0);
+      while (position < stat.size) {
+        const length = Math.min(MUSE_READ_CHUNK_BYTES, stat.size - position);
+        const chunk = Buffer.alloc(length);
+        const read = fssync.readSync(fd, chunk, 0, length, position);
+        if (read <= 0) break;
+        position += read;
+        const data = carry.length ? Buffer.concat([carry, chunk.subarray(0, read)]) : chunk.subarray(0, read);
+        // Only complete lines are consumed, so a record still being written is
+        // read whole on the next sync instead of being skipped.
+        const lastNewline = data.lastIndexOf(0x0a);
+        if (lastNewline < 0) { carry = data; continue; }
+        const complete = data.subarray(0, lastNewline + 1);
+        carry = Buffer.from(data.subarray(lastNewline + 1));
+        consumed += complete.length;
+        for (const line of complete.toString("utf8").split("\n")) {
+          if (!line.trim()) continue;
+          let entry;
+          try { entry = JSON.parse(line); } catch { continue; }
+          for (const rec of museRecords(entry)) handleRecord(rec, fileState);
+        }
+      }
+    } finally {
+      try { fssync.closeSync(fd); } catch { /* ignore */ }
+    }
+
+    const runModelKeys = Object.keys(fileState.runModels);
+    const keptRunModels = {};
+    // Bound the cursor: later records reference recent runs.
+    for (const key of runModelKeys.slice(-50)) keptRunModels[key] = fileState.runModels[key];
+    fileOffsets[filePath] = {
+      size: startOffset + consumed,
+      mtimeMs: stat.mtimeMs,
+      ino: stat.ino,
+      model: fileState.model,
+      runModels: keptRunModels,
+      counted: fileState.counted,
+    };
+    if (cb) {
+      cb({ index: fileIdx + 1, total: files.length, recordsProcessed, eventsAggregated, bucketsQueued: touchedBuckets.size });
+    }
+  }
+
+  const seenArr = Array.from(seenIds);
+  const cappedSeen = seenArr.length > 10_000 ? seenArr.slice(seenArr.length - 10_000) : seenArr;
+  const bucketsQueued = await enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets });
+  const updatedAt = new Date().toISOString();
+  hourlyState.updatedAt = updatedAt;
+  cursors.hourly = hourlyState;
+  cursors.muse = { ...state, seenIds: cappedSeen, fileOffsets, updatedAt };
+  return { recordsProcessed, eventsAggregated, bucketsQueued };
+}
+
 async function parseCraftIncremental({
   sessionFiles,
   cursors,
@@ -24865,6 +25091,9 @@ module.exports = {
   resolveReasonixTelemetryFiles,
   normalizeReasonixModel,
   parseReasonixIncremental,
+  resolveMuseHome,
+  resolveMuseSessionFiles,
+  parseMuseIncremental,
   // Exposed for regression tests covering cache-token accounting.
   normalizeGeminiTokens,
   normalizeOpencodeTokens,

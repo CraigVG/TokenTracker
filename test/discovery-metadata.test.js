@@ -124,7 +124,7 @@ test("marketing logo wall includes the same supported product integrations", () 
   assert.equal(ids.length, TOOL_COUNT);
   assert.equal(new Set(ids).size, TOOL_COUNT, "merged integrations keep unique carousel IDs");
 
-  for (const provider of ["every-code", "acode", "reasonix", "kilocode", "roocode", "zed", "goose", "droid", "qoder", "anythingllm", "dsh", "prime-agent", "trae-cn", "dots", "lmstudio", "unsloth", "devin", "cline", "minimax-code", "command-code", "dumate"]) {
+  for (const provider of ["every-code", "acode", "reasonix", "kilocode", "roocode", "zed", "goose", "droid", "qoder", "anythingllm", "dsh", "prime-agent", "trae-cn", "dots", "lmstudio", "unsloth", "devin", "cline", "minimax-code", "command-code", "dumate", "muse"]) {
     assert.ok(providers.includes(provider), `logo wall includes ${provider}`);
   }
 });
@@ -138,6 +138,7 @@ test("CLI onboarding advertises the same supported integrations", () => {
   assert.ok(SUPPORTED_PROVIDERS.includes("AnythingLLM Desktop"));
   assert.ok(SUPPORTED_PROVIDERS.includes("Qoder"));
   assert.ok(SUPPORTED_PROVIDERS.includes("Reasonix"));
+  assert.ok(SUPPORTED_PROVIDERS.includes("Muse Code"));
   assert.ok(SUPPORTED_PROVIDERS.includes("DeepSeek Harness"));
   assert.ok(SUPPORTED_PROVIDERS.includes("Prime Agent"));
   assert.ok(SUPPORTED_PROVIDERS.includes("TRAE Work CN"));

@@ -250,7 +250,8 @@ function computeRowCost(row) {
     row.source === "acode" ||
     row.source === "every-code" ||
     row.source === "omo" ||
-    row.source === "cline";
+    row.source === "cline" ||
+    row.source === "muse";
   const reasoningCost = reasoningIncludedInOutput
     ? 0
     : (row.reasoning_output_tokens || 0) * (pricing.output || 0);

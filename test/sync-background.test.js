@@ -131,6 +131,38 @@ async function writeReasonixTelemetry(home, sessionId) {
   }));
 }
 
+async function writeMuseSession(home, sessionId) {
+  const dir = path.join(home, ".local", "share", "muse", "sessions", "2026", "06", "30", sessionId);
+  await fs.mkdir(dir, { recursive: true });
+  const at = Date.parse("2026-06-30T10:15:00Z") * 1000;
+  const records = [
+    {
+      id: `${sessionId}-model`,
+      recorded_at: at,
+      payload_type: "run.model.configured",
+      payload: { kind: "run_model", record: { run_stream: { kind: "run", id: "run-1" }, model_id: "muse-wonder-full-1.0" } },
+    },
+    {
+      id: `${sessionId}-usage`,
+      recorded_at: at,
+      payload_type: "runtime.session",
+      payload: {
+        kind: "run",
+        run_id: "run-1",
+        event: {
+          kind: "goal_usage_attribution",
+          record: {
+            usage_id: `${sessionId}-usage`,
+            usage_family: "provider",
+            quantity: { unit: "tokens", reported: true, input_tokens: 100, cached_tokens: 60, output_tokens: 9, reasoning_tokens: 4 },
+          },
+        },
+      },
+    },
+  ];
+  await fs.writeFile(path.join(dir, "session.jsonl"), records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+}
+
 async function withTempSyncEnv(fn) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "tokentracker-background-"));
   const saved = {
@@ -146,6 +178,7 @@ async function withTempSyncEnv(fn) {
     OPENCODE_HOME: process.env.OPENCODE_HOME,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     TOKENTRACKER_REASONIX_HOME: process.env.TOKENTRACKER_REASONIX_HOME,
+    TOKENTRACKER_MUSE_HOME: process.env.TOKENTRACKER_MUSE_HOME,
     TOKENTRACKER_TRAE_HOME: process.env.TOKENTRACKER_TRAE_HOME,
     TOKENTRACKER_TRAE_DB: process.env.TOKENTRACKER_TRAE_DB,
     REASONIX_STATE_HOME: process.env.REASONIX_STATE_HOME,
@@ -173,6 +206,7 @@ async function withTempSyncEnv(fn) {
     process.env.TOKENTRACKER_TRAE_HOME = path.join(home, "trae-data");
     delete process.env.TOKENTRACKER_TRAE_DB;
     delete process.env.TOKENTRACKER_REASONIX_HOME;
+    delete process.env.TOKENTRACKER_MUSE_HOME;
     delete process.env.REASONIX_STATE_HOME;
     delete process.env.TOKENTRACKER_DEVICE_TOKEN;
     delete process.env.TOKENTRACKER_INSFORGE_BASE_URL;
@@ -691,6 +725,39 @@ test("default background auto sync includes Reasonix telemetry", async () => {
     const queue = await readQueue(home);
     assert.match(queue, /"source":"reasonix"/);
     assert.match(queue, /"model":"deepseek-reasoner"/);
+  });
+});
+
+test("all-local background sync includes Muse Code sessions", async () => {
+  await withTempSyncEnv(async (home) => {
+    await writeMuseSession(home, "muse-all-local");
+
+    await cmdSync(["--auto", "--background", "--all-local-sources"]);
+
+    const firstQueue = await readQueue(home);
+    const [row] = firstQueue.trim().split("\n").map(JSON.parse);
+    assert.equal(row.source, "muse");
+    assert.equal(row.model, "muse-wonder-full-1.0");
+    assert.equal(row.input_tokens, 40);
+    assert.equal(row.cached_input_tokens, 60);
+    assert.equal(row.output_tokens, 9);
+    assert.equal(row.reasoning_output_tokens, 4);
+    assert.equal(row.total_tokens, 109);
+
+    await cmdSync(["--auto", "--background", "--all-local-sources"]);
+    assert.equal(await readQueue(home), firstQueue);
+  });
+});
+
+test("default background auto sync includes Muse Code sessions", async () => {
+  await withTempSyncEnv(async (home) => {
+    await writeMuseSession(home, "muse-default-background");
+
+    await cmdSync(["--auto", "--background"]);
+
+    const queue = await readQueue(home);
+    assert.match(queue, /"source":"muse"/);
+    assert.match(queue, /"model":"muse-wonder-full-1.0"/);
   });
 });
 

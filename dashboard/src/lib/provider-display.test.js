@@ -27,6 +27,11 @@ describe("formatProviderDisplayName", () => {
     expect(formatProviderDisplayName("ACODE")).toBe("AStudio");
   });
 
+  it("uses the Muse Code product name", () => {
+    expect(formatProviderDisplayName("muse")).toBe("Muse Code");
+    expect(formatProviderDisplayName("MUSE")).toBe("Muse Code");
+  });
+
   it("gives Pi routed providers distinct readable names", () => {
     expect(formatProviderDisplayName("pi-anthropic")).toBe("Pi · Anthropic");
     expect(formatProviderDisplayName("PI-GITHUB-COPILOT")).toBe("Pi · GitHub Copilot");

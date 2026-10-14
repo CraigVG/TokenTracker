@@ -102,6 +102,8 @@ const {
   parseCraftIncremental,
   resolveReasonixTelemetryFiles,
   parseReasonixIncremental,
+  resolveMuseSessionFiles,
+  parseMuseIncremental,
   resolveGrokBuildSessions,
   parseGrokBuildIncremental,
   resolveAntigravityDbPath,
@@ -349,6 +351,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "lmstudio",
   "mimo",
   "minimax-code",
+  "muse",
   "omo",
   "omp",
   "opencode",
@@ -371,6 +374,7 @@ const BACKGROUND_AUTO_SYNC_SOURCES = new Set([
   "acode",
   "codex",
   "every-code",
+  "muse",
   "reasonix",
 ]);
 
@@ -2915,6 +2919,25 @@ async function cmdSync(argv, context = {}) {
       }
     }
 
+    // Muse Code (Meta) — usage counts from per-session session.jsonl logs.
+    let museResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    const museFiles = sourceAllowed("muse")
+      ? mergeBothFileSources({ resolveFiles: resolveMuseSessionFiles, env: process.env })
+      : [];
+    if (museFiles.length > 0) {
+      try {
+        museResult = await parseMuseIncremental({
+          sessionFiles: museFiles,
+          cursors,
+          queuePath,
+          env: process.env,
+          onProgress: makeProviderProgress("Muse"),
+        });
+      } catch (err) {
+        warnProviderParseFailure("Muse", err, opts);
+      }
+    }
+
     // ── Grok Build (xAI) ──
     let grokResult = {
       recordsProcessed: 0,
@@ -3373,6 +3396,7 @@ async function cmdSync(argv, context = {}) {
       minimaxCodeResult.recordsProcessed +
       craftResult.recordsProcessed +
       reasonixResult.recordsProcessed +
+      museResult.recordsProcessed +
       grokResult.recordsProcessed +
       copilotResult.recordsProcessed +
       lmstudioResult.recordsProcessed +
@@ -3419,6 +3443,7 @@ async function cmdSync(argv, context = {}) {
       minimaxCodeResult.bucketsQueued +
       craftResult.bucketsQueued +
       reasonixResult.bucketsQueued +
+      museResult.bucketsQueued +
       grokResult.bucketsQueued +
       copilotResult.bucketsQueued +
       lmstudioResult.bucketsQueued +

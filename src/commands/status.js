@@ -74,6 +74,8 @@ const {
   resolveCraftConfigDir,
   resolveReasonixHome,
   resolveReasonixTelemetryFiles,
+  resolveMuseHome,
+  resolveMuseSessionFiles,
   resolveKilocodeTaskFiles,
   resolveRoocodeTaskFiles,
   resolveClineSessionFilesWithStatus,
@@ -551,6 +553,10 @@ async function cmdStatus(argv = []) {
   const reasonixHome = resolveReasonixHome(process.env);
   const reasonixInstalled = Boolean(reasonixHome && fssync.existsSync(reasonixHome));
   const reasonixFiles = reasonixInstalled ? resolveReasonixTelemetryFiles(process.env) : [];
+
+  // Muse Code (Meta) — passive scan of per-session session.jsonl logs.
+  const museInstalled = fssync.existsSync(path.join(resolveMuseHome(process.env), "sessions"));
+  const museFiles = museInstalled ? resolveMuseSessionFiles(process.env) : [];
 
   // Kilo CLI (kilo.ai @kilocode/plugin) — passive scan of kilo.db.
   const xdgDataHome = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
@@ -1136,6 +1142,9 @@ async function cmdStatus(argv = []) {
         reasonix: reasonixInstalled
           ? { installed: true, files: reasonixFiles.length }
           : { installed: false },
+        muse: museInstalled
+          ? { installed: true, files: museFiles.length }
+          : { installed: false },
         anythingllm: anythingllmInstalled
           ? { installed: true, detail: anythingllmDbPath }
           : { installed: false },
@@ -1334,6 +1343,9 @@ async function cmdStatus(argv = []) {
         : null,
       reasonixInstalled
         ? `- Reasonix: passive reader (${reasonixFiles.length} telemetry file${reasonixFiles.length !== 1 ? "s" : ""} found)`
+        : null,
+      museInstalled
+        ? `- Muse Code: passive reader (${museFiles.length} session jsonl file${museFiles.length !== 1 ? "s" : ""} found)`
         : null,
       anythingllmInstalled
         ? `- AnythingLLM Desktop: passive reader (${anythingllmDbPath})`
