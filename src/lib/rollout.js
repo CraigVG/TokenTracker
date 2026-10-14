@@ -17229,15 +17229,25 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
 
   for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
     const filePath = files[fileIdx];
+    // Open first and stat the descriptor, so the size and inode describe the
+    // file that is actually read (no check-then-open race).
+    let fd;
+    try { fd = fssync.openSync(filePath, "r"); } catch { continue; }
     let stat;
-    try { stat = fssync.statSync(filePath); } catch { continue; }
+    try { stat = fssync.fstatSync(fd); } catch {
+      try { fssync.closeSync(fd); } catch { /* ignore */ }
+      continue;
+    }
 
     const prev = fileOffsets[filePath] || {};
     const prevSize = Number(prev.size) || 0;
     const inodeChanged = typeof prev.ino === "number" && prev.ino !== stat.ino;
     const rewound = stat.size < prevSize || inodeChanged;
     const startOffset = rewound ? 0 : prevSize;
-    if (stat.size <= startOffset) continue;
+    if (stat.size <= startOffset) {
+      try { fssync.closeSync(fd); } catch { /* ignore */ }
+      continue;
+    }
 
     const fileState = {
       model: rewound ? null : prev.model || null,
@@ -17247,8 +17257,6 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       isSubagent: filePath.split(path.sep).includes("subagent"),
     };
 
-    let fd;
-    try { fd = fssync.openSync(filePath, "r"); } catch { continue; }
     let consumed = 0;
     try {
       let position = startOffset;
