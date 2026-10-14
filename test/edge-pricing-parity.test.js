@@ -117,6 +117,13 @@ test("canonical pricing block retains regression-prone entries and matcher order
     '"mimo-v2-flash"',
     '"cursor-grok-4.5"',
     '"cursor-grok-4.5-fast"',
+    '"cursor-grok-4.6"',
+    '"cursor-grok-4.6-fast"',
+    '"cursor-grok-4.7"',
+    '"cursor-grok-4.7-fast"',
+    '"composer-2.5"',
+    '"composer-2.5-fast"',
+    '"gemini-4-argon"',
     '"glm-5.3"',
     '"glm-5.3-flash"',
     '"deepseek-v4.1-flash"',
@@ -149,10 +156,22 @@ test("canonical pricing block retains regression-prone entries and matcher order
   order('lower.includes("kimi-k2.6")', 'lower.includes("kimi")');
   order('lower.includes("mimo-v2.5-pro")', 'lower.includes("mimo-v2.5")');
   order(
+    'lower.includes("grok-4.7") && lower.includes("fast")',
+    'lower.includes("grok-4.7"))',
+  );
+  order('lower.includes("grok-4.7"))', 'lower.includes("grok-4.6"))');
+  order(
+    'lower.includes("grok-4.6") && lower.includes("fast")',
+    'lower.includes("grok-4.6"))',
+  );
+  order('lower.includes("grok-4.6"))', 'lower.includes("grok-4.5"))');
+  order(
     'lower.includes("grok-4.5") && lower.includes("fast")',
     'lower.includes("grok-4.5"))',
   );
   order('lower.includes("grok-4.5"))', 'lower.includes("grok-4"))');
+  order('lower.includes("gemini-4-argon")', 'lower.includes("gemini-3"))');
+  order('lower.includes("composer-2.5") && lower.includes("fast")', 'lower.includes("composer"))');
   // GLM-5.3 Flash is a distinct cheap SKU ($0.15/$0.50 vs the flagship's
   // $1.4/$4.4); its matcher must precede the base glm-5.3 matcher (substring)
   // and glm-5.3 must precede glm-5, or flash rows bill at 6.7x.

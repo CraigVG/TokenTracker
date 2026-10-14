@@ -219,6 +219,10 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   "composer-1.5": { input: 3.5, output: 17.5, cache_read: 0.35 },
   "composer-2": { input: 0.5, output: 2.5, cache_read: 0.2 },
   "composer-2-fast": { input: 1.5, output: 7.5, cache_read: 0.15 },
+  "composer-2.5": { input: 0.5, output: 2.5, cache_read: 0.2 },
+  "composer-2.5-fast": { input: 3, output: 15, cache_read: 0.5 },
+  // Google Gemini 4 Argon (Cursor Other Models / Google introductory list rate)
+  "gemini-4-argon": { input: 2, output: 10, cache_read: 0.1, cache_write: 0 },
   // ── Moonshot Kimi ──
   "kimi-for-coding": { input: 0.6, output: 2, cache_read: 0.15 },
   "kimi-k2.5": { input: 0.6, output: 2, cache_read: 0.15 },
@@ -273,6 +277,10 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   "grok-build": { input: 1.25, output: 2.50, cache_read: 0.20 },
   "cursor-grok-4.5": { input: 2, output: 6, cache_read: 0.5, cache_write: 0 },
   "cursor-grok-4.5-fast": { input: 4, output: 18, cache_read: 1, cache_write: 0 },
+  "cursor-grok-4.6": { input: 2, output: 6, cache_read: 0.5, cache_write: 0 },
+  "cursor-grok-4.6-fast": { input: 4, output: 12, cache_read: 1, cache_write: 0 },
+  "cursor-grok-4.7": { input: 2, output: 6, cache_read: 0.5, cache_write: 0 },
+  "cursor-grok-4.7-fast": { input: 4, output: 12, cache_read: 1, cache_write: 0 },
   "grok-4-0709": { input: 3.00, output: 15.00, cache_read: 0.75 },
   "grok-4": { input: 3.00, output: 15.00, cache_read: 0.75 },
   "grok-4-latest": { input: 3.00, output: 15.00, cache_read: 0.75 },
@@ -462,6 +470,8 @@ function getModelPricing(model: string, source = "") {
   if (lower.includes("gpt-5.1-codex-mini")) return MODEL_PRICING["gpt-5.1-codex-mini"];
   if (lower.includes("gpt-5.1")) return MODEL_PRICING["gpt-5.1-codex"];
   if (lower.includes("gpt-5")) return MODEL_PRICING["gpt-5"];
+  // gemini-4-argon must precede gemini-3 / gemini-2.5 substring matchers.
+  if (lower.includes("gemini-4-argon") || lower.includes("gemini-4.argon")) return MODEL_PRICING["gemini-4-argon"];
   // gemini-3 pro tiers (gemini-3-pro, gemini-3.1-pro, -high, -customtools…)
   // must not fall through to the flash rate (4x undercount).
   if (lower.includes("gemini-3") && lower.includes("pro")) return MODEL_PRICING["gemini-3-pro-preview"];
@@ -476,6 +486,12 @@ function getModelPricing(model: string, source = "") {
   if (lower.includes("deepseek-v4-pro")) return MODEL_PRICING["deepseek-v4-pro"];
   if (lower.includes("deepseek-reasoner")) return MODEL_PRICING["deepseek-reasoner"];
   if (lower.includes("deepseek-chat")) return MODEL_PRICING["deepseek-chat"];
+  // Cursor Grok 4.7/4.6/4.5 Fast SKUs must precede the generic grok-4 matcher
+  // (substring "grok-4" would otherwise bill Cursor Fast rows at xAI grok-4 rates).
+  if (lower.includes("grok-4.7") && lower.includes("fast")) return MODEL_PRICING["cursor-grok-4.7-fast"];
+  if (lower.includes("grok-4.7")) return MODEL_PRICING["cursor-grok-4.7"];
+  if (lower.includes("grok-4.6") && lower.includes("fast")) return MODEL_PRICING["cursor-grok-4.6-fast"];
+  if (lower.includes("grok-4.6")) return MODEL_PRICING["cursor-grok-4.6"];
   if (lower.includes("grok-4.5") && lower.includes("fast")) return MODEL_PRICING["cursor-grok-4.5-fast"];
   if (lower.includes("grok-4.5")) return MODEL_PRICING["cursor-grok-4.5"];
   if (lower.includes("grok-build")) return MODEL_PRICING["grok-build"];
@@ -522,6 +538,11 @@ function getModelPricing(model: string, source = "") {
   if (lower.includes("hy3")) return MODEL_PRICING["hy3-preview-agent"];
   if (/(?:^|\/)qwen3[.-]8-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(lower.trim())) return MODEL_PRICING["qwen3.8-flash"];
   if (lower.includes("hy4")) return MODEL_PRICING["hy4-preview"];
+  if (lower.includes("composer-2.5") && lower.includes("fast")) return MODEL_PRICING["composer-2.5-fast"];
+  if (lower.includes("composer-2.5")) return MODEL_PRICING["composer-2.5"];
+  if (lower.includes("composer-2-fast")) return MODEL_PRICING["composer-2-fast"];
+  if (lower.includes("composer-2")) return MODEL_PRICING["composer-2"];
+  if (lower.includes("composer-1.5")) return MODEL_PRICING["composer-1.5"];
   if (lower.includes("composer")) return MODEL_PRICING["composer-1"];
   if (lower.includes("fugu")) return MODEL_PRICING["sakana/fugu-ultra"];
   if (lower.includes("longcat")) return MODEL_PRICING["longcat-2.0"];

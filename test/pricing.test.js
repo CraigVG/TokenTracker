@@ -463,6 +463,18 @@ test("matcher: Cursor normalization preserves Grok Fast and canonicalizes Claude
     "cursor-grok-4.5",
   );
   assert.equal(
+    matcher.normalizeCursorModel("grok-4.7-high-fast"),
+    "cursor-grok-4.7-fast",
+  );
+  assert.equal(
+    matcher.normalizeCursorModel("grok-4.6-medium"),
+    "cursor-grok-4.6",
+  );
+  assert.equal(
+    matcher.normalizeCursorModel("gemini-4-argon-high"),
+    "gemini-4-argon",
+  );
+  assert.equal(
     matcher.normalizeCursorModel("claude-4.6-opus-medium-thinking"),
     "claude-opus-4-6",
   );
