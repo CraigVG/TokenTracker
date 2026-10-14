@@ -17110,6 +17110,7 @@ function resolveMuseHome(env = process.env) {
 
 const MUSE_SCAN_MAX_DEPTH = 8;
 const MUSE_READ_CHUNK_BYTES = 8 * 1024 * 1024;
+const MUSE_WATERMARK_IDS_MAX = 100;
 
 function collectMuseSessionFiles(dir, files, depth = 0) {
   if (depth > MUSE_SCAN_MAX_DEPTH) return;
@@ -17194,11 +17195,15 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     const usageId = typeof usage.usage_id === "string" ? usage.usage_id : null;
     if (!usageId || seenIds.has(usageId)) return;
     // A rewritten log is re-read from the start, and `seenIds` keeps only the
-    // newest 10k ids. Usage rows at or before the last one counted from this
-    // file are already in the queue, so skip them even if their id was evicted.
+    // newest 10k ids. Rows older than the last one counted from this file are
+    // already in the queue, so skip them even if their id was evicted. Rows at
+    // exactly that timestamp are skipped only when their id was counted, so a
+    // new row that shares the timestamp is kept.
     const micros = Number(rec.recorded_at);
-    if (fileState.skipThrough && Number.isFinite(micros) && micros <= fileState.skipThrough) return;
-    if (Number.isFinite(micros) && micros > fileState.watermark) fileState.watermark = micros;
+    if (fileState.skipThrough && Number.isFinite(micros)) {
+      if (micros < fileState.skipThrough) return;
+      if (micros === fileState.skipThrough && fileState.skipIds.has(usageId)) return;
+    }
 
     recordsProcessed++;
     const inputTotal = toNonNegativeInt(quantity.input_tokens);
@@ -17230,6 +17235,14 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     });
     touchedBuckets.add(bucketKey("muse", model, bucketStart));
     eventsAggregated++;
+    // Advance only for rows that reached a bucket, remembering the ids that
+    // share the newest timestamp.
+    if (micros > fileState.watermark) {
+      fileState.watermark = micros;
+      fileState.watermarkIds = [usageId];
+    } else if (micros === fileState.watermark && fileState.watermarkIds.length < MUSE_WATERMARK_IDS_MAX) {
+      fileState.watermarkIds.push(usageId);
+    }
   };
 
   for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
@@ -17262,7 +17275,9 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       // Latest usage timestamp (epoch µs) counted from this file; on a rewrite
       // it becomes the point below which rows are not counted again.
       watermark: Number(prev.watermark) || 0,
+      watermarkIds: Array.isArray(prev.watermarkIds) ? prev.watermarkIds.slice(0, MUSE_WATERMARK_IDS_MAX) : [],
       skipThrough: rewound ? Number(prev.watermark) || 0 : 0,
+      skipIds: new Set(rewound && Array.isArray(prev.watermarkIds) ? prev.watermarkIds : []),
       isSubagent: filePath.split(path.sep).includes("subagent"),
     };
 
@@ -17307,6 +17322,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       runModels: keptRunModels,
       counted: fileState.counted,
       watermark: fileState.watermark,
+      watermarkIds: fileState.watermarkIds,
     };
     if (cb) {
       cb({ index: fileIdx + 1, total: files.length, recordsProcessed, eventsAggregated, bucketsQueued: touchedBuckets.size });

@@ -229,6 +229,49 @@ test("parseMuseIncremental does not recount a rewritten log whose ids fell out o
     assert.equal(rows[rows.length - 1].input_tokens, 200);
   }));
 
+test("parseMuseIncremental keeps a new row that shares the watermark timestamp after a rewrite", () =>
+  withHome(async (home, env) => {
+    const step = { input_tokens: 100, cached_tokens: 0, output_tokens: 10, reasoning_tokens: 0 };
+    const model = modelRecord("r1", "muse-wonder-full-1.0");
+    const first = usageRecord("u1", "r1", step, { atUs: T0_US });
+    const file = writeSession(home, "2026/10/13/s1", [model, first]);
+    const queuePath = path.join(home, "queue.jsonl");
+    const cursors = {};
+    await parseMuseIncremental({ cursors, queuePath, env });
+
+    cursors.muse.seenIds = [];
+    const sameInstant = usageRecord("u2", "r1", step, { atUs: T0_US });
+    const replacement = `${file}.tmp`;
+    fs.writeFileSync(replacement, [model, first, sameInstant].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    fs.renameSync(replacement, file);
+    const again = await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(again.eventsAggregated, 1, "u1 is skipped by id, u2 is new");
+    const rows = readRows(queuePath);
+    assert.equal(rows[rows.length - 1].input_tokens, 200);
+  }));
+
+test("parseMuseIncremental does not move the watermark past a zero-token row", () =>
+  withHome(async (home, env) => {
+    const step = { input_tokens: 100, cached_tokens: 0, output_tokens: 10, reasoning_tokens: 0 };
+    const zero = { input_tokens: 0, cached_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
+    const model = modelRecord("r1", "muse-wonder-full-1.0");
+    const first = usageRecord("u1", "r1", step, { atUs: T0_US });
+    const idle = usageRecord("u2", "r1", zero, { atUs: T0_US + 120_000_000 });
+    const file = writeSession(home, "2026/10/13/s1", [model, first, idle]);
+    const queuePath = path.join(home, "queue.jsonl");
+    const cursors = {};
+    await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(cursors.muse.fileOffsets[file].watermark, T0_US);
+
+    cursors.muse.seenIds = [];
+    const between = usageRecord("u3", "r1", step, { atUs: T0_US + 60_000_000 });
+    const replacement = `${file}.tmp`;
+    fs.writeFileSync(replacement, [model, first, between, idle].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    fs.renameSync(replacement, file);
+    const again = await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(again.eventsAggregated, 1, "the row between the two timestamps is counted");
+  }));
+
 test("parseMuseIncremental reads records inside a retained frame", () =>
   withHome(async (home, env) => {
     const frame = {
