@@ -17201,7 +17201,7 @@ function musePrefixFingerprint(fd, size) {
   return head && tail ? `${head}:${tail}` : null;
 }
 
-function museResumeLooksAppendOnly(fd, prevSize, prev, currentPrefixFp) {
+function museResumeLooksAppendOnly(fd, prevSize, prev, currentPrefixFp, currentMtimeMs, currentSize) {
   if (prev?.forceRewind === true) return false;
   if (!(prevSize > 0)) return true;
   if (typeof prev?.prefixFp === "string" && prev.prefixFp && prev.prefixFp !== currentPrefixFp) return false;
@@ -17209,6 +17209,17 @@ function museResumeLooksAppendOnly(fd, prevSize, prev, currentPrefixFp) {
   if (!prev?.prefixFp && typeof prev?.headFp === "string" && prev.headFp) {
     const head = museHeadFingerprint(fd, prevSize);
     if (head && head !== prev.headFp) return false;
+  }
+  // Equal-size rewrite above the full-prefix cap (or any equal-size rewrite that
+  // preserves sampled bytes) still bumps mtime on real filesystems. Only apply
+  // when the size is unchanged — growth from an append also changes mtime.
+  if (
+    Number(currentSize) === Number(prevSize) &&
+    Number.isFinite(Number(prev?.mtimeMs)) &&
+    Number.isFinite(Number(currentMtimeMs)) &&
+    Number(prev.mtimeMs) !== Number(currentMtimeMs)
+  ) {
+    return false;
   }
   // Resume offset must be a JSONL record boundary.
   const buf = Buffer.alloc(1);
@@ -17341,7 +17352,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     // middle at equal size, or be observed while empty mid-rewrite. Validate
     // the consumed-prefix fingerprint (and forceRewind) before append-only.
     const appendOnly = !inodeChanged && stat.size >= prevSize &&
-      museResumeLooksAppendOnly(fd, prevSize, prev, prefixFp);
+      museResumeLooksAppendOnly(fd, prevSize, prev, prefixFp, stat.mtimeMs, stat.size);
     const rewound = !appendOnly;
     const startOffset = rewound ? 0 : prevSize;
     if (stat.size <= startOffset) {
@@ -17379,6 +17390,26 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     };
 
     let consumed = 0;
+    // Hash the bytes we actually parse so a rewrite between read and cursor
+    // save cannot invent a matching fingerprint for unread content.
+    const consumedHash = crypto.createHash("sha256");
+    let hashedPrefix = startOffset === 0;
+    if (startOffset > 0 && startOffset <= MUSE_PREFIX_FINGERPRINT_MAX_BYTES) {
+      // Include the already-trusted prefix so the saved fingerprint covers
+      // the full consumed region, not only this sync's delta.
+      let off = 0;
+      const pre = Buffer.alloc(Math.min(64 * 1024, startOffset));
+      while (off < startOffset) {
+        const want = Math.min(pre.length, startOffset - off);
+        const read = fssync.readSync(fd, pre, 0, want, off);
+        if (read <= 0) break;
+        consumedHash.update(pre.subarray(0, read));
+        off += read;
+      }
+      hashedPrefix = off === startOffset;
+    } else if (startOffset > MUSE_PREFIX_FINGERPRINT_MAX_BYTES) {
+      hashedPrefix = false;
+    }
     try {
       let position = startOffset;
       let carry = Buffer.alloc(0);
@@ -17395,6 +17426,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
         if (lastNewline < 0) { carry = data; continue; }
         const complete = data.subarray(0, lastNewline + 1);
         carry = Buffer.from(data.subarray(lastNewline + 1));
+        if (hashedPrefix) consumedHash.update(complete);
         consumed += complete.length;
         for (const line of complete.toString("utf8").split("\n")) {
           if (!line.trim()) continue;
@@ -17412,23 +17444,23 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     // Bound the cursor: later records reference recent runs.
     for (const key of runModelKeys.slice(-50)) keptRunModels[key] = fileState.runModels[key];
     const consumedSize = startOffset + consumed;
-    // fd is closed in the read finally above; reopen briefly for fingerprints.
-    let savedHeadFp = headFp;
     let savedPrefixFp = null;
-    {
+    if (hashedPrefix && consumedSize <= MUSE_PREFIX_FINGERPRINT_MAX_BYTES) {
+      savedPrefixFp = consumedHash.digest("hex");
+    } else {
+      // Over-cap or incomplete prefix hash: fall back to open+sample.
       let checkFd;
       try {
         checkFd = fssync.openSync(filePath, "r");
-        savedHeadFp = museHeadFingerprint(checkFd, consumedSize) || headFp;
         savedPrefixFp = musePrefixFingerprint(checkFd, consumedSize);
-      } catch { /* fingerprint refresh is best-effort */ }
+      } catch { /* best-effort */ }
       finally { if (checkFd !== undefined) try { fssync.closeSync(checkFd); } catch { /* ignore */ } }
     }
     fileOffsets[filePath] = {
       size: consumedSize,
       mtimeMs: stat.mtimeMs,
       ino: stat.ino,
-      headFp: savedHeadFp,
+      headFp,
       prefixFp: savedPrefixFp,
       forceRewind: false,
       model: fileState.model,
