@@ -298,6 +298,42 @@ test("parseMuseIncremental rewinds when an in-place compaction grows past the ol
     assert.equal(rows[rows.length - 1].input_tokens, 200);
   }));
 
+
+test("parseMuseIncremental rewinds when an equal-size in-place rewrite preserves the head bytes", () =>
+  withHome(async (home, env) => {
+    const step = { input_tokens: 100, cached_tokens: 0, output_tokens: 10, reasoning_tokens: 0 };
+    const model = modelRecord("r1", "muse-wonder-full-1.0");
+    // Pad the model line so the first 256 bytes stay identical across the rewrite.
+    model.id = `model-${"x".repeat(400)}`;
+    const u1 = usageRecord("u1", "r1", step, { atUs: T0_US });
+    const u2 = usageRecord("u2", "r1", step, { atUs: T0_US + 60_000_000 });
+    const file = writeSession(home, "2026/10/13/s1", [model, u1, u2]);
+    const queuePath = path.join(home, "queue.jsonl");
+    const cursors = {};
+    await parseMuseIncremental({ cursors, queuePath, env });
+    const prevSize = cursors.muse.fileOffsets[file].size;
+
+    const u3 = usageRecord("u3", "r1", step, { atUs: T0_US + 120_000_000 });
+    // Replace the middle record while keeping the leading bytes and total size.
+    let rewritten = [model, u2, u3].map((r) => JSON.stringify(r)).join("\n") + "\n";
+    const prev = fs.readFileSync(file);
+    if (Buffer.byteLength(rewritten) < prev.length) {
+      rewritten = rewritten.slice(0, -1) + " ".repeat(prev.length - Buffer.byteLength(rewritten)) + "\n";
+    } else if (Buffer.byteLength(rewritten) > prev.length) {
+      // Keep the fixture honest: truncate padding on u2 payload is awkward; skip if sizes diverge too much.
+    }
+    // Prefer exact size match via padding after the final newline-removed body.
+    const body = [model, u2, u3].map((r) => JSON.stringify(r)).join("\n");
+    const pad = prev.length - Buffer.byteLength(body) - 1;
+    assert.ok(pad >= 0, `need equal-or-smaller rewrite for this fixture (pad=${pad})`);
+    fs.writeFileSync(file, body + " ".repeat(pad) + "\n");
+    assert.equal(fs.statSync(file).size, prevSize);
+
+    cursors.muse.seenIds = [];
+    const again = await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(again.eventsAggregated, 1, "u3 must be counted after equal-size middle rewrite");
+  }));
+
 test("parseMuseIncremental reads records inside a retained frame", () =>
   withHome(async (home, env) => {
     const frame = {
