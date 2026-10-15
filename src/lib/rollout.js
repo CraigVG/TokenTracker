@@ -17410,7 +17410,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     } else if (startOffset > MUSE_PREFIX_FINGERPRINT_MAX_BYTES) {
       hashedPrefix = false;
     }
-    try {
+    {
       let position = startOffset;
       let carry = Buffer.alloc(0);
       while (position < stat.size) {
@@ -17435,26 +17435,18 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
           for (const rec of museRecords(entry)) handleRecord(rec, fileState);
         }
       }
-    } finally {
-      try { fssync.closeSync(fd); } catch { /* ignore */ }
-    }
-
     const runModelKeys = Object.keys(fileState.runModels);
     const keptRunModels = {};
     // Bound the cursor: later records reference recent runs.
     for (const key of runModelKeys.slice(-50)) keptRunModels[key] = fileState.runModels[key];
     const consumedSize = startOffset + consumed;
+    // Fingerprint from the same descriptor we read — never reopen (CodeQL
+    // file-system-race) and never trust a post-read rewrite.
     let savedPrefixFp = null;
     if (hashedPrefix && consumedSize <= MUSE_PREFIX_FINGERPRINT_MAX_BYTES) {
       savedPrefixFp = consumedHash.digest("hex");
     } else {
-      // Over-cap or incomplete prefix hash: fall back to open+sample.
-      let checkFd;
-      try {
-        checkFd = fssync.openSync(filePath, "r");
-        savedPrefixFp = musePrefixFingerprint(checkFd, consumedSize);
-      } catch { /* best-effort */ }
-      finally { if (checkFd !== undefined) try { fssync.closeSync(checkFd); } catch { /* ignore */ } }
+      try { savedPrefixFp = musePrefixFingerprint(fd, consumedSize); } catch { /* best-effort */ }
     }
     fileOffsets[filePath] = {
       size: consumedSize,
@@ -17469,6 +17461,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       watermark: fileState.watermark,
       watermarkIds: fileState.watermarkIds,
     };
+    try { fssync.closeSync(fd); } catch { /* ignore */ }
     if (cb) {
       cb({ index: fileIdx + 1, total: files.length, recordsProcessed, eventsAggregated, bucketsQueued: touchedBuckets.size });
     }
