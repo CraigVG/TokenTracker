@@ -17160,12 +17160,11 @@ function* museRecords(entry) {
 
 
 const MUSE_HEAD_FINGERPRINT_BYTES = 256;
-const MUSE_TAIL_FINGERPRINT_BYTES = 256;
+const MUSE_PREFIX_FINGERPRINT_MAX_BYTES = 8 * 1024 * 1024;
 
 // Fingerprints for Muse session logs so an in-place rewrite is not mistaken
-// for an append. Head catches shrink-then-grow past the old size; the
-// checkpoint (tail of the consumed prefix) catches equal-size middle rewrites
-// that preserve the first 256 bytes and a newline at the old offset.
+// for an append. Prefer a hash of the entire consumed prefix (capped); fall
+// back to head+tail samples only when the prefix exceeds the cap.
 function museRangeFingerprint(fd, offset, length) {
   const n = Math.max(0, Number(length) || 0);
   if (n <= 0) return null;
@@ -17179,17 +17178,38 @@ function museHeadFingerprint(fd, size) {
   return museRangeFingerprint(fd, 0, Math.min(MUSE_HEAD_FINGERPRINT_BYTES, Math.max(0, Number(size) || 0)));
 }
 
-function museCheckpointFingerprint(fd, size) {
+function musePrefixFingerprint(fd, size) {
   const total = Math.max(0, Number(size) || 0);
   if (total <= 0) return null;
-  const length = Math.min(MUSE_TAIL_FINGERPRINT_BYTES, total);
-  return museRangeFingerprint(fd, total - length, length);
+  if (total <= MUSE_PREFIX_FINGERPRINT_MAX_BYTES) {
+    const hash = crypto.createHash("sha256");
+    let offset = 0;
+    const chunk = Buffer.alloc(Math.min(64 * 1024, total));
+    while (offset < total) {
+      const want = Math.min(chunk.length, total - offset);
+      const read = fssync.readSync(fd, chunk, 0, want, offset);
+      if (read <= 0) break;
+      hash.update(chunk.subarray(0, read));
+      offset += read;
+    }
+    return offset === total ? hash.digest("hex") : null;
+  }
+  // Large logs: sample head and tail of the consumed prefix.
+  const head = museHeadFingerprint(fd, total);
+  const tailLen = Math.min(MUSE_HEAD_FINGERPRINT_BYTES, total);
+  const tail = museRangeFingerprint(fd, total - tailLen, tailLen);
+  return head && tail ? `${head}:${tail}` : null;
 }
 
-function museResumeLooksAppendOnly(fd, prevSize, prev, currentHeadFp, currentTailFp) {
+function museResumeLooksAppendOnly(fd, prevSize, prev, currentPrefixFp) {
+  if (prev?.forceRewind === true) return false;
   if (!(prevSize > 0)) return true;
-  if (typeof prev?.headFp === "string" && prev.headFp && prev.headFp !== currentHeadFp) return false;
-  if (typeof prev?.tailFp === "string" && prev.tailFp && prev.tailFp !== currentTailFp) return false;
+  if (typeof prev?.prefixFp === "string" && prev.prefixFp && prev.prefixFp !== currentPrefixFp) return false;
+  // Legacy cursors without prefixFp: reject when the head sample diverges.
+  if (!prev?.prefixFp && typeof prev?.headFp === "string" && prev.headFp) {
+    const head = museHeadFingerprint(fd, prevSize);
+    if (head && head !== prev.headFp) return false;
+  }
   // Resume offset must be a JSONL record boundary.
   const buf = Buffer.alloc(1);
   const read = fssync.readSync(fd, buf, 0, 1, prevSize - 1);
@@ -17315,29 +17335,28 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     const prev = fileOffsets[filePath] || {};
     const prevSize = Number(prev.size) || 0;
     const inodeChanged = typeof prev.ino === "number" && prev.ino !== stat.ino;
+    const prefixFp = musePrefixFingerprint(fd, Math.min(prevSize, stat.size));
     const headFp = museHeadFingerprint(fd, stat.size);
-    const tailFp = museCheckpointFingerprint(fd, Math.min(prevSize, stat.size));
-    // Same-inode compaction can shrink then grow past prevSize, or rewrite the
-    // middle while keeping size and a newline at the old offset. Validate head
-    // + consumed-prefix checkpoint fingerprints before treating growth as append-only.
+    // Same-inode compaction can shrink then grow past prevSize, rewrite the
+    // middle at equal size, or be observed while empty mid-rewrite. Validate
+    // the consumed-prefix fingerprint (and forceRewind) before append-only.
     const appendOnly = !inodeChanged && stat.size >= prevSize &&
-      museResumeLooksAppendOnly(fd, prevSize, prev, headFp, tailFp);
+      museResumeLooksAppendOnly(fd, prevSize, prev, prefixFp);
     const rewound = !appendOnly;
     const startOffset = rewound ? 0 : prevSize;
     if (stat.size <= startOffset) {
-      // Still refresh the cursor fingerprint when the file shrank-equal with
-      // no new bytes, so a later growth is compared against current content.
-      // Use headFp/tailFp captured while fd is still open.
-      if (rewound || prev.headFp !== headFp || prev.tailFp !== tailFp || prev.size !== stat.size || prev.ino !== stat.ino) {
-        fileOffsets[filePath] = {
-          ...prev,
-          size: Math.min(prevSize, stat.size),
-          mtimeMs: stat.mtimeMs,
-          ino: stat.ino,
-          headFp,
-          tailFp,
-        };
-      }
+      const emptyObserved = stat.size <= 0 && prevSize > 0;
+      fileOffsets[filePath] = {
+        ...prev,
+        size: Math.min(prevSize, stat.size),
+        mtimeMs: stat.mtimeMs,
+        ino: stat.ino,
+        headFp,
+        prefixFp: stat.size > 0 ? musePrefixFingerprint(fd, stat.size) : null,
+        // An empty observation between truncate and rewrite must not clear
+        // watermark-based replay protection on the next population.
+        forceRewind: emptyObserved || prev.forceRewind === true || rewound,
+      };
       try { fssync.closeSync(fd); } catch { /* ignore */ }
       continue;
     }
@@ -17395,13 +17414,13 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     const consumedSize = startOffset + consumed;
     // fd is closed in the read finally above; reopen briefly for fingerprints.
     let savedHeadFp = headFp;
-    let savedTailFp = null;
+    let savedPrefixFp = null;
     {
       let checkFd;
       try {
         checkFd = fssync.openSync(filePath, "r");
         savedHeadFp = museHeadFingerprint(checkFd, consumedSize) || headFp;
-        savedTailFp = museCheckpointFingerprint(checkFd, consumedSize);
+        savedPrefixFp = musePrefixFingerprint(checkFd, consumedSize);
       } catch { /* fingerprint refresh is best-effort */ }
       finally { if (checkFd !== undefined) try { fssync.closeSync(checkFd); } catch { /* ignore */ } }
     }
@@ -17410,7 +17429,8 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       mtimeMs: stat.mtimeMs,
       ino: stat.ino,
       headFp: savedHeadFp,
-      tailFp: savedTailFp,
+      prefixFp: savedPrefixFp,
+      forceRewind: false,
       model: fileState.model,
       runModels: keptRunModels,
       counted: fileState.counted,

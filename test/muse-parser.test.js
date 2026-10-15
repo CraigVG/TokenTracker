@@ -377,6 +377,62 @@ test("parseMuseIncremental does not treat a Muse home path containing subagent a
     assert.equal(row.conversation_count, 1);
   }));
 
+
+test("parseMuseIncremental keeps watermark protection across an empty mid-rewrite observation", () =>
+  withHome(async (home, env) => {
+    const step = { input_tokens: 100, cached_tokens: 0, output_tokens: 10, reasoning_tokens: 0 };
+    const model = modelRecord("r1", "muse-wonder-full-1.0");
+    const first = usageRecord("u1", "r1", step, { atUs: T0_US });
+    const file = writeSession(home, "2026/10/13/s1", [model, first]);
+    const queuePath = path.join(home, "queue.jsonl");
+    const cursors = {};
+    await parseMuseIncremental({ cursors, queuePath, env });
+
+    // Observe the file while it is empty (truncate before rewrite).
+    fs.writeFileSync(file, "");
+    await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(cursors.muse.fileOffsets[file].forceRewind, true);
+    assert.equal(cursors.muse.fileOffsets[file].watermark, T0_US);
+
+    cursors.muse.seenIds = [];
+    const again = usageRecord("u1-again", "r1", step, { atUs: T0_US }); // same timestamp, new id
+    // Restore content that includes the already-counted timestamp/id family.
+    fs.writeFileSync(file, [model, first].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    // Evict u1 from seenIds so only watermark/forceRewind protects against recount.
+    const restored = await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(restored.eventsAggregated, 0, "previously counted watermarked rows must not recount");
+  }));
+
+
+test("parseMuseIncremental rewinds when an equal-size rewrite changes only interior bytes", () =>
+  withHome(async (home, env) => {
+    const step = { input_tokens: 100, cached_tokens: 0, output_tokens: 10, reasoning_tokens: 0 };
+    const model = modelRecord("r1", "muse-wonder-full-1.0");
+    model.id = `model-${"h".repeat(400)}`; // keep head sample stable
+    const u1 = usageRecord("u1", "r1", step, { atUs: T0_US });
+    const u2 = usageRecord("u2", "r1", step, { atUs: T0_US + 60_000_000 });
+    const file = writeSession(home, "2026/10/13/s1", [model, u1, u2]);
+    // Pad the file so the last 256 bytes are dominated by a stable trailer.
+    const trailer = "\n" + JSON.stringify({ pad: "t".repeat(400) }) + "\n";
+    fs.appendFileSync(file, trailer);
+    const queuePath = path.join(home, "queue.jsonl");
+    const cursors = {};
+    await parseMuseIncremental({ cursors, queuePath, env });
+    const prev = fs.readFileSync(file);
+    const prevSize = prev.length;
+
+    const u3 = usageRecord("u3", "r1", step, { atUs: T0_US + 120_000_000 });
+    const body = [model, u2, u3].map((r) => JSON.stringify(r)).join("\n");
+    const pad = prevSize - Buffer.byteLength(body) - Buffer.byteLength(trailer);
+    assert.ok(pad >= 0, `pad=${pad}`);
+    fs.writeFileSync(file, body + " ".repeat(pad) + trailer);
+    assert.equal(fs.statSync(file).size, prevSize);
+
+    cursors.muse.seenIds = [];
+    const again = await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(again.eventsAggregated, 1, "u3 counted after interior-only equal-size rewrite");
+  }));
+
 test("parseMuseIncremental reads records inside a retained frame", () =>
   withHome(async (home, env) => {
     const frame = {
