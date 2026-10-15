@@ -272,6 +272,32 @@ test("parseMuseIncremental does not move the watermark past a zero-token row", (
     assert.equal(again.eventsAggregated, 1, "the row between the two timestamps is counted");
   }));
 
+
+test("parseMuseIncremental rewinds when an in-place compaction grows past the old size", () =>
+  withHome(async (home, env) => {
+    const step = { input_tokens: 100, cached_tokens: 0, output_tokens: 10, reasoning_tokens: 0 };
+    const model = modelRecord("r1", "muse-wonder-full-1.0");
+    const first = usageRecord("u1", "r1", step, { atUs: T0_US });
+    const file = writeSession(home, "2026/10/13/s1", [model, first]);
+    const queuePath = path.join(home, "queue.jsonl");
+    const cursors = {};
+    await parseMuseIncremental({ cursors, queuePath, env });
+    const prevSize = cursors.muse.fileOffsets[file].size;
+    assert.ok(prevSize > 0);
+
+    // Same inode: shrink then grow past the previous size. Without a head
+    // fingerprint check the old byte offset would land mid-record.
+    const added = usageRecord("u2", "r1", step, { atUs: T0_US + 60_000_000 });
+    const compacted = [model, first, added].map((r) => JSON.stringify(r)).join("\n") + "\n";
+    assert.ok(Buffer.byteLength(compacted) > prevSize, "fixture must grow past the prior offset");
+    fs.writeFileSync(file, compacted);
+    cursors.muse.seenIds = [];
+    const again = await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(again.eventsAggregated, 1, "only the new row is counted after in-place rewrite");
+    const rows = readRows(queuePath);
+    assert.equal(rows[rows.length - 1].input_tokens, 200);
+  }));
+
 test("parseMuseIncremental reads records inside a retained frame", () =>
   withHome(async (home, env) => {
     const frame = {

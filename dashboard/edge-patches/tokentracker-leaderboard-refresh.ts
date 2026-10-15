@@ -619,7 +619,7 @@ function computeRowCost(row: HourlyRow): number {
   // Must stay in lockstep with src/lib/pricing/index.js:computeRowCost.
   const reasoningIncludedInOutput =
     row.source === "codex" || row.source === "acode" || row.source === "every-code" ||
-    row.source === "cline" || row.source === "omo";
+    row.source === "cline" || row.source === "omo" || row.source === "muse";
   const reasoningCost = reasoningIncludedInOutput
     ? 0
     : (row.reasoning_output_tokens || 0) * (p.output || 0);

@@ -922,7 +922,7 @@ async function handleAccountRequest(req: Request): Promise<Response> {
       src === "pi-github-copilot" || src === "pi-copilot" || src === "lmstudio";
     const reasoningIncludedInOutput =
       src === "codex" || src === "acode" || src === "every-code" ||
-      src === "cline" || src === "omo";
+      src === "cline" || src === "omo" || src === "muse";
     const reportedCost = Number(row.total_cost_usd);
     ma.totalCostUsd += subscriptionBacked
       ? 0

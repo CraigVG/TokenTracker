@@ -17158,6 +17158,30 @@ function* museRecords(entry) {
   yield entry;
 }
 
+
+const MUSE_HEAD_FINGERPRINT_BYTES = 256;
+
+// Fingerprint the start of a Muse session log so an in-place compaction that
+// shrinks then grows past the previous size (same inode) is detected as a
+// rewrite instead of resuming mid-record.
+function museHeadFingerprint(fd, size) {
+  const length = Math.min(MUSE_HEAD_FINGERPRINT_BYTES, Math.max(0, Number(size) || 0));
+  if (length <= 0) return null;
+  const buf = Buffer.alloc(length);
+  const read = fssync.readSync(fd, buf, 0, length, 0);
+  if (read <= 0) return null;
+  return crypto.createHash("sha256").update(buf.subarray(0, read)).digest("hex");
+}
+
+function museResumeLooksAppendOnly(fd, prevSize, prevHeadFp, currentHeadFp) {
+  if (!(prevSize > 0)) return true;
+  if (typeof prevHeadFp === "string" && prevHeadFp && prevHeadFp !== currentHeadFp) return false;
+  // Resume offset must be a JSONL record boundary.
+  const buf = Buffer.alloc(1);
+  const read = fssync.readSync(fd, buf, 0, 1, prevSize - 1);
+  return read === 1 && buf[0] === 0x0a;
+}
+
 async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgress, env } = {}) {
   await ensureDir(path.dirname(queuePath));
   const state = cursors.muse && typeof cursors.muse === "object" ? cursors.muse : {};
@@ -17260,10 +17284,27 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     const prev = fileOffsets[filePath] || {};
     const prevSize = Number(prev.size) || 0;
     const inodeChanged = typeof prev.ino === "number" && prev.ino !== stat.ino;
-    const rewound = stat.size < prevSize || inodeChanged;
+    const headFp = museHeadFingerprint(fd, stat.size);
+    // Same-inode compaction can shrink then grow past prevSize; the old byte
+    // offset would land mid-record. Validate the head fingerprint and that
+    // prevSize still sits on a newline before treating growth as append-only.
+    const appendOnly = !inodeChanged && stat.size >= prevSize &&
+      museResumeLooksAppendOnly(fd, prevSize, prev.headFp, headFp);
+    const rewound = !appendOnly;
     const startOffset = rewound ? 0 : prevSize;
     if (stat.size <= startOffset) {
       try { fssync.closeSync(fd); } catch { /* ignore */ }
+      // Still refresh the cursor fingerprint when the file shrank-equal with
+      // no new bytes, so a later growth is compared against current content.
+      if (rewound || prev.headFp !== headFp || prev.size !== stat.size || prev.ino !== stat.ino) {
+        fileOffsets[filePath] = {
+          ...prev,
+          size: Math.min(prevSize, stat.size),
+          mtimeMs: stat.mtimeMs,
+          ino: stat.ino,
+          headFp,
+        };
+      }
       continue;
     }
 
@@ -17318,6 +17359,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       size: startOffset + consumed,
       mtimeMs: stat.mtimeMs,
       ino: stat.ino,
+      headFp,
       model: fileState.model,
       runModels: keptRunModels,
       counted: fileState.counted,

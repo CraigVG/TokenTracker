@@ -592,7 +592,7 @@ function computeRowCost(row: UsageRow): number {
   const p = getRowPricing({ ...row, model: modelForPricing });
   const reasoningIncludedInOutput =
     row.source === "codex" || row.source === "acode" || row.source === "every-code" ||
-    row.source === "cline" || row.source === "omo";
+    row.source === "cline" || row.source === "omo" || row.source === "muse";
   const reasoningCost = reasoningIncludedInOutput
     ? 0
     : (row.reasoning_output_tokens || 0) * (p.output || 0);
