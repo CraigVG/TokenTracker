@@ -17435,6 +17435,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
           for (const rec of museRecords(entry)) handleRecord(rec, fileState);
         }
       }
+    }
     const runModelKeys = Object.keys(fileState.runModels);
     const keptRunModels = {};
     // Bound the cursor: later records reference recent runs.
