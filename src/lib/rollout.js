@@ -17196,6 +17196,23 @@ function museResumeLooksAppendOnly(fd, prevSize, prev, currentHeadFp, currentTai
   return read === 1 && buf[0] === 0x0a;
 }
 
+
+// Subagent logs live under .../sessions/<session>/subagent/... . Matching any
+// ancestor named "subagent" would misclassify roots when the Muse home path
+// itself contains that segment (e.g. TOKENTRACKER_MUSE_HOME=/data/subagent/muse).
+function isMuseSubagentSessionFile(filePath, env = process.env) {
+  const sessionsRoot = path.join(resolveMuseHome(env), "sessions");
+  const relative = path.relative(sessionsRoot, filePath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    // Outside the configured sessions root — fall back to a local segment check
+    // that still requires the subagent directory to be a parent of session.jsonl.
+    const parts = filePath.split(path.sep);
+    const sessionIdx = parts.lastIndexOf("session.jsonl");
+    return sessionIdx > 0 && parts.slice(0, sessionIdx).includes("subagent");
+  }
+  return relative.split(path.sep).includes("subagent");
+}
+
 async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgress, env } = {}) {
   await ensureDir(path.dirname(queuePath));
   const state = cursors.muse && typeof cursors.muse === "object" ? cursors.muse : {};
@@ -17326,8 +17343,11 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
     }
 
     const fileState = {
-      model: rewound ? null : prev.model || null,
-      runModels: rewound ? {} : { ...(prev.runModels || {}) },
+      // Keep known model attribution across rewinds: compaction may drop the
+      // original run.model.configured rows while later usage for those runs
+      // remains. Replayed configuration records still overwrite these maps.
+      model: prev.model || null,
+      runModels: { ...(prev.runModels || {}) },
       // A rewritten log keeps its flag: its usage ids were already counted.
       counted: prev.counted === true,
       // Latest usage timestamp (epoch µs) counted from this file; on a rewrite
@@ -17336,7 +17356,7 @@ async function parseMuseIncremental({ sessionFiles, cursors, queuePath, onProgre
       watermarkIds: Array.isArray(prev.watermarkIds) ? prev.watermarkIds.slice(0, MUSE_WATERMARK_IDS_MAX) : [],
       skipThrough: rewound ? Number(prev.watermark) || 0 : 0,
       skipIds: new Set(rewound && Array.isArray(prev.watermarkIds) ? prev.watermarkIds : []),
-      isSubagent: filePath.split(path.sep).includes("subagent"),
+      isSubagent: isMuseSubagentSessionFile(filePath, env || process.env),
     };
 
     let consumed = 0;

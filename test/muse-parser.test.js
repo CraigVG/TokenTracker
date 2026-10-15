@@ -334,6 +334,49 @@ test("parseMuseIncremental rewinds when an equal-size in-place rewrite preserves
     assert.equal(again.eventsAggregated, 1, "u3 must be counted after equal-size middle rewrite");
   }));
 
+
+test("parseMuseIncremental keeps known run models after a rewrite drops the configured record", () =>
+  withHome(async (home, env) => {
+    const step = { input_tokens: 100, cached_tokens: 0, output_tokens: 10, reasoning_tokens: 0 };
+    const model = modelRecord("r1", "muse-wonder-full-1.0");
+    const first = usageRecord("u1", "r1", step, { atUs: T0_US });
+    const file = writeSession(home, "2026/10/13/s1", [model, first]);
+    const queuePath = path.join(home, "queue.jsonl");
+    const cursors = {};
+    await parseMuseIncremental({ cursors, queuePath, env });
+
+    cursors.muse.seenIds = [];
+    const later = usageRecord("u2", "r1", step, { atUs: T0_US + 60_000_000 });
+    // Compaction drops the model.configured row but keeps usage for the same run.
+    const replacement = `${file}.tmp`;
+    fs.writeFileSync(replacement, [first, later].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    fs.renameSync(replacement, file);
+    const again = await parseMuseIncremental({ cursors, queuePath, env });
+    assert.equal(again.eventsAggregated, 1);
+    const rows = readRows(queuePath);
+    assert.equal(rows[rows.length - 1].model, "muse-wonder-full-1.0");
+  }));
+
+test("parseMuseIncremental does not treat a Muse home path containing subagent as a subagent session", () =>
+  withHome(async (home) => {
+    const museHome = path.join(home, "data", "subagent", "muse");
+    const env = { HOME: home, TOKENTRACKER_MUSE_HOME: museHome, XDG_CONFIG_HOME: path.join(home, ".config") };
+    const dir = path.join(museHome, "sessions", "2026/10/13/s1");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "session.jsonl");
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify(modelRecord("r1", "muse-wonder-full-1.0")),
+        JSON.stringify(usageRecord("u1", "r1", { input_tokens: 11, cached_tokens: 0, output_tokens: 1, reasoning_tokens: 0 })),
+      ].join("\n") + "\n",
+    );
+    const queuePath = path.join(home, "queue.jsonl");
+    await parseMuseIncremental({ cursors: {}, queuePath, env });
+    const [row] = readRows(queuePath);
+    assert.equal(row.conversation_count, 1);
+  }));
+
 test("parseMuseIncremental reads records inside a retained frame", () =>
   withHome(async (home, env) => {
     const frame = {
